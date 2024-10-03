@@ -1,0 +1,122 @@
+networks:
+  workloads:
+    driver: bridge
+  dataplane:
+    driver: bridge
+  controlplane:
+    driver: bridge
+
+services:
+
+  # -------------------------------------------------------------------------------------------------------------------
+  #                                                 "Secure" enclave
+  # -------------------------------------------------------------------------------------------------------------------
+  nginx:
+    image: nginx:latest
+    ports:
+      - "80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      - workloads
+
+  # -------------------------------------------------------------------------------------------------------------------
+  #                                                 Coder platform
+  # -------------------------------------------------------------------------------------------------------------------
+  coderd:
+    image: ghcr.io/coder/coder:v2.15.0
+    container_name: coderd
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - '3000:3000'
+    networks:
+      - controlplane
+      - dataplane
+    environment:
+      CODER_HTTP_ADDRESS: '0.0.0.0:3000'
+      CODER_ACCESS_URL: 'http://localhost:3000'
+      CODER_PG_CONNECTION_URL: 'postgres://coder:coder@postgres:5432/coder?sslmode=disable'
+      CODER_PROVISIONER_DAEMONS: 0
+      CODER_PROVISIONER_DAEMON_PSK: 🤫
+    entrypoint: /opt/coder
+    command:
+      - server
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:3000/ || exit 1" ]
+      interval: 1s
+      timeout: 5s
+      retries: 10
+      start_period: 2s
+  coder-init:
+    image: ghcr.io/coder/coder:v2.15.0
+    container_name: coder-init
+    depends_on:
+      - coderd
+    networks:
+      - controlplane
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Waiting for coderd to be ready...';
+        until nc -z coderd 3000; do
+          echo -n '.';
+          sleep 0.5;
+        done;
+        echo '';
+        echo 'coderd is up, proceeding to create the first user.';
+        coder login --first-user-username=srecon --first-user-email=danny@coder.com --first-user-password=sreconemea2024! --first-user-trial=true http://coderd:3000;
+      "
+  provisionerd-init:
+    image: busybox
+    depends_on:
+      - provisionerd
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+        echo 'Preparing cache dir';
+        mkdir -p /cache/.terraform.d/plugin-cache
+      "
+    volumes:
+      - provisionerd-cache:/cache
+  provisionerd:
+    #TODO: wait until controlplane is ready! first start results in 403 otherwise
+    image: ghcr.io/coder/coder:v2.15.0
+    container_name: provisionerd
+    restart: unless-stopped
+    depends_on:
+      - coderd
+    networks:
+      - dataplane
+      - workloads
+    environment:
+      CODER_URL: 'http://coderd:3000'
+      CODER_PROVISIONER_DAEMON_PSK: 🤫
+      CODER_VERBOSE: true
+    user: '0:0'
+    entrypoint: /opt/coder
+    command:
+      - provisionerd
+      - start
+    privileged: true
+    volumes:
+      - .terraformrc:/home/coder/.terraformrc # cache wtf?
+      - provisionerd-cache:/home/coder
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: 'coder'
+      POSTGRES_PASSWORD: 'coder'
+      POSTGRES_DB: 'coder'
+    networks:
+      - controlplane
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data: { }
+  provisionerd-cache: {}
