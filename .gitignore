@@ -1,1 +1,3 @@
 sre-template/.terraform*
+.terraform*
+terraform*

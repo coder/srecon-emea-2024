@@ -1,10 +1,13 @@
 networks:
   workloads:
     driver: bridge
+    name: workloads
   dataplane:
     driver: bridge
+    name: coder-dataplane
   controlplane:
     driver: bridge
+    name: coder-controlplane
 
 services:
 
@@ -44,30 +47,28 @@ services:
     command:
       - server
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:3000/ || exit 1" ]
-      interval: 1s
+      test: [ "CMD-SHELL", "curl -f http://localhost:3000/healthz || exit 1" ]
+      interval: 5s
       timeout: 5s
       retries: 10
-      start_period: 2s
+      start_period: 10s
   coder-init:
     image: ghcr.io/coder/coder:v2.15.0
     container_name: coder-init
     depends_on:
-      - coderd
+      coderd:
+        condition: service_healthy
     networks:
       - controlplane
     restart: "no"
-    entrypoint: >
-      /bin/sh -c "
-        echo 'Waiting for coderd to be ready...';
-        until nc -z coderd 3000; do
-          echo -n '.';
-          sleep 0.5;
-        done;
-        echo '';
-        echo 'coderd is up, proceeding to create the first user.';
-        coder login --first-user-username=srecon --first-user-email=danny@coder.com --first-user-password=sreconemea2024! --first-user-trial=true http://coderd:3000;
-      "
+    user: '0'
+    env_file:
+      - .env
+    entrypoint: /init.sh
+    volumes:
+      - coderd-data:/coder
+      - ./coderd:/coder-tf
+      - ./coder-init.sh:/init.sh
   provisionerd-init:
     image: busybox
     depends_on:
@@ -85,8 +86,10 @@ services:
     image: ghcr.io/coder/coder:v2.15.0
     container_name: provisionerd
     restart: unless-stopped
+
     depends_on:
-      - coderd
+      coderd:
+        condition: service_healthy
     networks:
       - dataplane
       - workloads
@@ -118,5 +121,6 @@ services:
       - postgres-data:/var/lib/postgresql/data
 
 volumes:
+  coderd-data: { }
   postgres-data: { }
-  provisionerd-cache: {}
+  provisionerd-cache: { }
